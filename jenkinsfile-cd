@@ -1,0 +1,249 @@
+pipeline {
+    agent any
+
+    environment {
+        SLACK_CHANNEL = '#jenkins-notifications'
+        SLACK_CREDENTIALS_ID = 'jenkins-slack'
+        NEXUS_URL = 'https://nexus.u-cloudsolutions.xyz'
+        NEXUS_REPOSITORY = 'student-repository'
+        NEXUS_DOCKER_REPOSITORY = 'new-docker-repository'
+        NEXUS_CREDENTIALS_ID = 'emna-nexus-credentials'
+        MAVEN_GROUP_ID = 'com.mycompany.nest'
+        MAVEN_ARTIFACT_ID = 'my-artifact'
+        ZIP_FILE_NAME = "${MAVEN_ARTIFACT_ID}-${env.GIT_COMMIT_ID}.zip"
+        DOWNLOAD_PATH = "${env.WORKSPACE}/${ZIP_FILE_NAME}"
+        EXTRACT_PATH = "${env.WORKSPACE}/extracted"
+        DEPLOYMENT_CONTAINER_NAME = 'myapp-container'
+        DEPLOYMENT_PORT = '10088'
+        JMETER_IMAGE_NAME = 'jmeter-image'
+        JMETER_TEST_PLAN_PATH = 'test/test_plan.jmx'
+        JMETER_RESULTS_PATH = 'test/results_dir'
+    }
+
+    parameters {
+        string(name: 'VERSION_TAG', defaultValue: '', description: 'Version tag to check and deploy')
+    }
+
+    stages {
+        stage('Start Pipeline') {
+            steps {
+                script {
+                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Pipeline started for version ${params.VERSION_TAG}"
+                }
+            }
+        }
+
+        stage('Check Artifact in Nexus') {
+            when {
+                expression { return params.VERSION_TAG }
+            }
+            steps {
+                script {
+                    def versionTag = params.VERSION_TAG
+                    def nexusUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MAVEN_GROUP_ID.replace('.', '/')}/${MAVEN_ARTIFACT_ID}/${versionTag}/${ZIP_FILE_NAME}"
+                    
+                    echo "Checking artifact in Nexus at URL: ${nexusUrl}"
+
+                    def response = sh(script: """
+                        curl -u emna:xAEVDA7B49 -o /dev/null -s -w "%{http_code}" "${nexusUrl}"
+                        """, returnStdout: true).trim()
+
+                    echo "HTTP response code: ${response}"
+                    
+                    def statusColor = response == '200' ? 'good' : 'danger'
+                    def statusMessage = response == '200' ? "Artifact found in Nexus at URL: ${nexusUrl}" : "Artifact not found in Nexus at URL: ${nexusUrl}"
+                    
+                    slackSend channel: SLACK_CHANNEL, color: statusColor, message: statusMessage
+                }
+            }
+        }
+
+        stage('Download Artifact from Nexus') {
+            when {
+                expression { return params.VERSION_TAG }
+            }
+            steps {
+                script {
+                    def versionTag = params.VERSION_TAG
+                    def downloadUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MAVEN_GROUP_ID.replace('.', '/')}/${MAVEN_ARTIFACT_ID}/${versionTag}/${ZIP_FILE_NAME}"
+                    
+                    echo "Downloading artifact from Nexus at URL: ${downloadUrl}"
+
+                    withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        sh """
+                            curl -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} -o ${DOWNLOAD_PATH} "${downloadUrl}"
+                        """
+                    }
+                    echo "Artifact downloaded to ${DOWNLOAD_PATH}"
+                    
+                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Artifact downloaded from Nexus to ${DOWNLOAD_PATH}"
+                }
+            }
+        }
+
+        stage('Unzip Artifact') {
+            when {
+                expression { return params.VERSION_TAG }
+            }
+            steps {
+                script {
+                    echo "Unzipping artifact at ${DOWNLOAD_PATH} to ${EXTRACT_PATH}..."
+
+                    sh """
+                        mkdir -p ${EXTRACT_PATH}
+                        unzip -o ${DOWNLOAD_PATH} -d ${EXTRACT_PATH}
+                    """
+                    echo "Artifact unzipped to ${EXTRACT_PATH}"
+                    
+                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Artifact unzipped to ${EXTRACT_PATH}"
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def dockerImageName = "u-cloudsolutions/nestproject"
+                    def versionTag = params.VERSION_TAG
+                    def dockerImageTag = "${dockerImageName}:${versionTag}"
+
+                    echo "Building Docker image ${dockerImageTag}..."
+
+                    def buildStatus = sh(script: "docker build -t ${dockerImageTag} -f project-nestjs/Dockerfile .", returnStatus: true)
+
+                    def buildColor = buildStatus == 0 ? 'good' : 'danger'
+                    def buildMessage = buildStatus == 0 ? "Docker image ${dockerImageTag} built successfully." : "Failed to build Docker image ${dockerImageTag}."
+
+                    slackSend channel: SLACK_CHANNEL, color: buildColor, message: buildMessage
+                    
+                    env.DOCKER_IMAGE_TAG = dockerImageTag
+                }
+            }
+        }
+
+        stage('Publish Docker Image to Nexus') {
+            when {
+                expression { return env.DOCKER_IMAGE_TAG }
+            }
+            steps {
+                script {
+                    def dockerRegistryUrl = "127.0.1.1:10001/${NEXUS_DOCKER_REPOSITORY}/"
+                    def dockerImageTag = env.DOCKER_IMAGE_TAG
+                    
+                    echo "Publishing Docker image ${dockerImageTag} to Nexus at ${dockerRegistryUrl}..."
+
+                    withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        def publishStatus = sh(script: """
+                            echo "" | docker login 127.0.1.1:10001 --username emna --password xAEVDA7B49
+                            docker tag ${dockerImageTag} ${dockerRegistryUrl}${dockerImageTag}
+                            docker push ${dockerRegistryUrl}${dockerImageTag}
+                        """, returnStatus: true)
+
+                        def publishColor = publishStatus == 0 ? 'good' : 'danger'
+                        def publishMessage = publishStatus == 0 ? "Docker image ${dockerImageTag} published to Nexus successfully." : "Failed to publish Docker image ${dockerImageTag} to Nexus."
+
+                        slackSend channel: SLACK_CHANNEL, color: publishColor, message: publishMessage
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Docker Container') {
+            steps {
+                script {
+                    def dockerImageTag = env.DOCKER_IMAGE_TAG
+                    def portMapping = "${DEPLOYMENT_PORT}:80"
+                    def versionTag = params.VERSION_TAG
+                    def containerName = "${DEPLOYMENT_CONTAINER_NAME}-${versionTag}"
+
+                    echo "Deploying Docker image ${dockerImageTag} with container name ${containerName} on port ${DEPLOYMENT_PORT}..."
+
+                    def deployStatus = sh(script: """
+                        docker stop ${containerName} || true
+                        docker rm ${containerName} || true
+                        docker run -d --name ${containerName} -p ${portMapping} ${dockerImageTag}
+                    """, returnStatus: true)
+
+                    def deployColor = deployStatus == 0 ? 'good' : 'danger'
+                    def deployMessage = deployStatus == 0 ? "Docker container ${containerName} deployed successfully." : "Failed to deploy Docker container ${containerName}."
+
+                    slackSend channel: SLACK_CHANNEL, color: deployColor, message: deployMessage
+                }
+            }
+        }
+
+        stage('Check Container Status') {
+            steps {
+                script {
+                    sh "docker ps -a"
+                    sh "docker inspect ${DEPLOYMENT_CONTAINER_NAME}-${params.VERSION_TAG}"
+                    sh "docker logs ${DEPLOYMENT_CONTAINER_NAME}-${params.VERSION_TAG}"
+                }
+            }
+        }
+
+        stage('Run JMeter Tests') {
+            steps {
+                script {
+                    try {
+                        echo 'Building JMeter Docker image...'
+                        sh """
+                            docker build -f ${EXTRACT_PATH}/test/Dockerfile.jmeter -t ${JMETER_IMAGE_NAME} ${EXTRACT_PATH}
+                        """
+                        echo 'Cleaning up previous results...'
+                        sh """
+                            rm -rf ${EXTRACT_PATH}/${JMETER_RESULTS_PATH}/*
+                        """
+
+                        echo 'Running JMeter tests...'
+                        def versionTag = params.VERSION_TAG
+                        def containerName = "${DEPLOYMENT_CONTAINER_NAME}-${versionTag}"
+                        
+                        sh """
+                            docker run --rm \
+                                --link ${containerName}:my-app \
+                                -v ${EXTRACT_PATH}/${JMETER_TEST_PLAN_PATH}:/test/test_plan.jmx \
+                                -v ${EXTRACT_PATH}/${JMETER_RESULTS_PATH}:/test/results \
+                                ${JMETER_IMAGE_NAME} \
+                                -n -t /test/test_plan.jmx -l /test/results/results.jtl -e -o /test/results -Jhostname=my-app -Jport=80
+                        """
+                        slackSend channel: SLACK_CHANNEL, color: 'good', message: "JMeter tests completed successfully."
+                    } catch (Exception e) {
+                        echo "JMeter test execution failed, due to reports ${e.message}"
+                        slackSend channel: SLACK_CHANNEL, color: 'danger', message: "JMeter test execution failed: ${e.message}"
+                    }
+                }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                script {
+                    // Stop and remove Docker container
+                    sh """
+                        docker stop ${DEPLOYMENT_CONTAINER_NAME} || true
+                        docker rm ${DEPLOYMENT_CONTAINER_NAME} || true
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                slackSend channel: SLACK_CHANNEL, color: 'good', message: "Pipeline completed successfully. All stages executed without errors."
+            }
+        }
+        failure {
+            script {
+                slackSend channel: SLACK_CHANNEL, color: 'danger', message: "Pipeline failed. Check the logs for details."
+            }
+        }
+        always {
+            script {
+                echo "Pipeline execution finished."
+            }
+        }
+    }
+}
