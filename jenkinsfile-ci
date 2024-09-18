@@ -1,48 +1,95 @@
+def COMMIT_ID
+def ZIP_FILE_NAME
+
 pipeline {
     agent any
-
     environment {
-        // Define environment variables
-        NEXUS_CREDENTIALS_ID = 'emna-nexus-credentials'
+        NEXUS_CREDENTIALS_ID = 'nexus-jenkins'
         NEXUS_URL = 'https://nexus.u-cloudsolutions.xyz'
         NEXUS_REPOSITORY = 'student-repository'
-        MAVEN_GROUP_ID = 'com.mycompany.nest'
-        MAVEN_ARTIFACT_ID = 'my-artifact'
-        ZIP_FILE_NAME = "${MAVEN_ARTIFACT_ID}-${GIT_COMMIT_ID}.zip"
+        GROUP_ID = 'com.artificial.Nest-JS'
+        ARTIFACT_ID = 'artifact'
     }
 
-    stages {
-        stage('Checkout SCM') {
+    stages { 
+        stage('started') {
+            steps {
+                slackSend channel: "#jenkins-notifications", message: "STARTED: job '${env.JOB_NAME} ${env.BUILD_NUMBER}' (${env.BUILD_URL})"
+            }
+        }
+
+        stage('Checkout') {
             steps {
                 script {
-                    def scmInfo = checkout([
-                        $class: 'GitSCM',
-                        branches: [[name: '*/develop']],
-                        userRemoteConfigs: [[
-                            url: 'https://gitlab.u-cloudsolutions.xyz/summary-internship/2024/emna-bouaziz/nest-project.git',
-                            credentialsId: 'emna-gitlab-credentials'
-                        ]]
-                    ])
-                    env.GIT_COMMIT_ID = scmInfo.GIT_COMMIT.take(8) // Truncate commit ID to 8 characters
-                    echo "Checked out commit ID: ${env.GIT_COMMIT_ID}"
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: "master"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [],
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[credentialsId: 'authentification-gitlab', url: 'https://gitlab.u-cloudsolutions.xyz/summary-internship/2024/wissem-sghaier/project-nest-js.git']]
+                    ]) 
+                    sh "git rev-parse --short HEAD > commit_hash.txt"
+                    COMMIT_ID = readFile('commit_hash.txt').trim()
+                    ZIP_FILE_NAME = "${ARTIFACT_ID}-${COMMIT_ID}.zip"
+                    echo "Commit Hash: ${COMMIT_ID}"
+                    echo "Zip File Name: ${ZIP_FILE_NAME}"
+                }
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Checkout of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Checkout of pipeline failed!")
                 }
             }
         }
 
-
-
-        stage('Install Node.js Packages') {
+        stage('Install Dependencies') {
             steps {
-                sh 'npm install'
+                script {
+                    sh 'npm install'
+                }
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Install Dependencies of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Install Dependencies of pipeline failed!")
+                }
             }
         }
 
-        stage('Build Project') {
+        stage('Build') {
             steps {
                 sh 'npm run build'
             }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Build of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Build of pipeline failed!")
+                }
+            }
         }
 
+        stage('Unit Tests') {
+            steps {
+                script {
+                    sh 'npm test'
+                }
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Run Unit Tests of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Run Unit Tests of pipeline failed!")
+                }
+            }
+        }
 
         stage('Code Quality Check via SonarQube') {
             steps {
@@ -51,14 +98,37 @@ pipeline {
                     withSonarQubeEnv('sonarqube-container') {
                         sh """
                         ${scannerHome}/bin/sonar-scanner \
-                        -Dsonar.projectKey=nest-project-emna \
-                        -Dsonar.projectName=nest-project-emna \
+                        -Dsonar.projectKey=nest-js-project \
+                        -Dsonar.projectName=nest-js-project \
                         -Dsonar.sources=. \
                         -Dsonar.host.url=https://sonarqube.u-cloudsolutions.xyz \
-                        -Dsonar.login=squ_d690104d2547bcbc73d95f1e2974f2b447a5c2bc \
+                        -Dsonar.login=squ_b730e6c811798750f5442b5ec90950a58600c316 \
                         -Dsonar.exclusions=vendor/**
                         """
                     }
+                }
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Code Quality Check via SonarQube of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Code Quality Check via SonarQube of pipeline failed!")
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                sleep 60
+                waitForQualityGate abortPipeline: true
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Quality Gate of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Quality Gate of pipeline failed!")
                 }
             }
         }
@@ -67,27 +137,56 @@ pipeline {
             steps {
                 script {
                     echo "Packaging project as ${ZIP_FILE_NAME}..."
-                    sh "zip -r ${ZIP_FILE_NAME} ."
-                    echo 'Project packaging complete.'
+                    sh "sudo apt-get install -y zip"
+                    sh """
+                        zip -r ${ZIP_FILE_NAME} .
+                    """
+                }
+            }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Package Project of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Package Project of pipeline failed!")
                 }
             }
         }
 
         stage('Upload to Nexus') {
             steps {
-                script {
-                    echo "Uploading ${ZIP_FILE_NAME} to Nexus..."
-
-                    withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
-                        def uploadUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MAVEN_GROUP_ID.replace('.', '/')}/${MAVEN_ARTIFACT_ID}/${env.GIT_COMMIT_ID}/${ZIP_FILE_NAME}"
-                        
+                withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                    script {
+                        def uploadUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${GROUP_ID.replace('.', '/')}/${ARTIFACT_ID}/${COMMIT_ID}/${ZIP_FILE_NAME}"
+                        echo "Uploading ${ZIP_FILE_NAME} to Nexus..."
                         sh """
-                        curl -u $NEXUS_USERNAME:$NEXUS_PASSWORD --upload-file ${ZIP_FILE_NAME} "$uploadUrl"
+                        curl -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} \
+                             --upload-file ${ZIP_FILE_NAME} \
+                             "${uploadUrl}"
                         """
                     }
-                    echo 'Upload to Nexus complete.'
                 }
             }
+            post {
+                success {
+                    slackSend(color: 'good', message: "Upload to Nexus of pipeline succeeded!")
+                }
+                failure {
+                    slackSend(color: 'danger', message: "Upload to Nexus of pipeline failed!")
+                }
+            }
+        }
+    }
+
+    post {
+        always {      
+            cleanWs()      
+        }
+        success {
+            slackSend(channel: '#jenkins-alerts-pfe-2023', message: "Build ${currentBuild.result} for job ${env.JOB_NAME} #${env.BUILD_NUMBER} (duration: ${currentBuild.durationString}). Check out the build at ${env.BUILD_URL}")
+        }
+        failure {
+            slackSend(channel: '#jenkins-alerts-pfe-2023', message: "Build ${currentBuild.result} for ${env.JOB_NAME} #${env.BUILD_NUMBER} (duration: ${currentBuild.durationString}). Check out the build at ${env.BUILD_URL}")
         }
     }
 }
