@@ -1,249 +1,355 @@
+def COMMIT_ID
+def ZIP_FILE_NAME
 pipeline {
-    agent any
-
-    environment {
-        SLACK_CHANNEL = '#jenkins-notifications'
-        SLACK_CREDENTIALS_ID = 'jenkins-slack'
-        NEXUS_URL = 'https://nexus.u-cloudsolutions.xyz'
-        NEXUS_REPOSITORY = 'student-repository'
-        NEXUS_DOCKER_REPOSITORY = 'new-docker-repository'
-        NEXUS_CREDENTIALS_ID = 'emna-nexus-credentials'
-        MAVEN_GROUP_ID = 'com.mycompany.nest'
-        MAVEN_ARTIFACT_ID = 'my-artifact'
-        ZIP_FILE_NAME = "${MAVEN_ARTIFACT_ID}-${env.GIT_COMMIT_ID}.zip"
-        DOWNLOAD_PATH = "${env.WORKSPACE}/${ZIP_FILE_NAME}"
-        EXTRACT_PATH = "${env.WORKSPACE}/extracted"
-        DEPLOYMENT_CONTAINER_NAME = 'myapp-container'
-        DEPLOYMENT_PORT = '10088'
-        JMETER_IMAGE_NAME = 'jmeter-image'
-        JMETER_TEST_PLAN_PATH = 'test/test_plan.jmx'
-        JMETER_RESULTS_PATH = 'test/results_dir'
-    }
-
+    agent any 
     parameters {
-        string(name: 'VERSION_TAG', defaultValue: '', description: 'Version tag to check and deploy')
+    string(name:'COMMIT_ID', defaultValue: '', description: 'Version tag')
+  } 
+    environment {
+        NEXUS_CREDENTIALS_ID = 'nexus-jenkins'
+        NEXUS_URL = 'https://nexus.u-cloudsolutions.xyz'
+        NEXUS_DOCKER_REPOSITORY = 'nest-js-repository'
+        NEXUS_REPOSITORY = 'student-repository'
+        GROUP_ID = 'com.artificial.Nest-JS'
+        ARTIFACT_ID = 'artifact'
+        JMETER_HOME = '/opt/apache-jmeter'  // Set the path to JMeter installation
+        JMETER_TEST_FILE = 'unzip_dir/tests/jmeter/performance-test.jmx'
+        JMETER_TEST_FILE_TMP = 'performance-test.jmx' // Nom du fichier dans le conteneur
+        JMETER_IMAGE_TAG = 'your-jmeter-image:latest'  // Docker image tag
+        
+
+
     }
-
     stages {
-        stage('Start Pipeline') {
+        stage ("started "){
             steps {
-                script {
-                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Pipeline started for version ${params.VERSION_TAG}"
-                }
+                slackSend channel: "#jenkins-notifications", message: " STARTED:job  '${env.JOB_NAME} ${env.BUILD_NUMBER}' (${env.BUILD_URL})"
             }
         }
 
-        stage('Check Artifact in Nexus') {
-            when {
-                expression { return params.VERSION_TAG }
-            }
+
+        stage('Check Nexus Tag') {
             steps {
                 script {
-                    def versionTag = params.VERSION_TAG
-                    def nexusUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MAVEN_GROUP_ID.replace('.', '/')}/${MAVEN_ARTIFACT_ID}/${versionTag}/${ZIP_FILE_NAME}"
-                    
-                    echo "Checking artifact in Nexus at URL: ${nexusUrl}"
+                    def commitId = params.COMMIT_ID
+                    echo "Commit ID: ${commitId}"
 
-                    def response = sh(script: """
-                        curl -u emna:xAEVDA7B49 -o /dev/null -s -w "%{http_code}" "${nexusUrl}"
-                        """, returnStdout: true).trim()
+                    def url = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${GROUP_ID.replace('.', '/')}/${ARTIFACT_ID}/${commitId}/${ARTIFACT_ID}-${commitId}.zip"
+                    echo "Checking URL: ${url}"
 
-                    echo "HTTP response code: ${response}"
-                    
-                    def statusColor = response == '200' ? 'good' : 'danger'
-                    def statusMessage = response == '200' ? "Artifact found in Nexus at URL: ${nexusUrl}" : "Artifact not found in Nexus at URL: ${nexusUrl}"
-                    
-                    slackSend channel: SLACK_CHANNEL, color: statusColor, message: statusMessage
+                    def response = sh(script: "curl -sS -o /dev/null -w '%{http_code}' ${url}", returnStdout: true).trim()
+                    echo "HTTP Response Code: ${response}"
+
+                    if (response == '404') {
+                        error "Version tag '${commitId}' does not exist in Nexus for artifact '${GROUP_ID}:${ARTIFACT_ID}'"
+                    } else {
+                        echo "Version tag '${commitId}' exists in Nexus for artifact '${GROUP_ID}:${ARTIFACT_ID}'"
+                    }
                 }
             }
-        }
-
-        stage('Download Artifact from Nexus') {
-            when {
-                expression { return params.VERSION_TAG }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Check Nexus Tag of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Check Nexus Tag  of pipeline  failed!")
+                }
             }
+
+        }
+        stage('Pull Code from Nexus') {
             steps {
                 script {
-                    def versionTag = params.VERSION_TAG
-                    def downloadUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MAVEN_GROUP_ID.replace('.', '/')}/${MAVEN_ARTIFACT_ID}/${versionTag}/${ZIP_FILE_NAME}"
-                    
+                    def commit = params.COMMIT_ID
+                    def zipFileName = "${ARTIFACT_ID}-${commit}.zip"
+                    def downloadUrl = "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${GROUP_ID.replace('.', '/')}/${ARTIFACT_ID}/${commit}/${zipFileName}"
+
                     echo "Downloading artifact from Nexus at URL: ${downloadUrl}"
 
                     withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
                         sh """
-                            curl -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} -o ${DOWNLOAD_PATH} "${downloadUrl}"
+                            curl -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} -o ${zipFileName} "${downloadUrl}"
                         """
                     }
-                    echo "Artifact downloaded to ${DOWNLOAD_PATH}"
-                    
-                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Artifact downloaded from Nexus to ${DOWNLOAD_PATH}"
                 }
             }
-        }
-
-        stage('Unzip Artifact') {
-            when {
-                expression { return params.VERSION_TAG }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Pull Code from Nexus of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Pull Code from Nexus  of pipeline  failed!")
+                }
             }
+
+        }
+        stage('Unzip Artifact') {
             steps {
                 script {
-                    echo "Unzipping artifact at ${DOWNLOAD_PATH} to ${EXTRACT_PATH}..."
+                    def commitId = params.COMMIT_ID
+                    def zipFileName = "${ARTIFACT_ID}-${commitId}.zip"
+                    def unzipDir = "unzip_dir"
+
+                    echo "Unzipping artifact: ${zipFileName}"
 
                     sh """
-                        mkdir -p ${EXTRACT_PATH}
-                        unzip -o ${DOWNLOAD_PATH} -d ${EXTRACT_PATH}
+                        mkdir -p ${unzipDir}
+                        unzip -o ${zipFileName} -d ${unzipDir}
                     """
-                    echo "Artifact unzipped to ${EXTRACT_PATH}"
-                    
-                    slackSend channel: SLACK_CHANNEL, color: 'good', message: "Artifact unzipped to ${EXTRACT_PATH}"
                 }
             }
-        }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Unzip Artifact of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Unzip Artifact  of pipeline  failed!")
+                }
+            }
 
+        }
         stage('Build Docker Image') {
             steps {
                 script {
-                    def dockerImageName = "u-cloudsolutions/nestproject"
-                    def versionTag = params.VERSION_TAG
-                    def dockerImageTag = "${dockerImageName}:${versionTag}"
+                    def commitId = params.COMMIT_ID
+                    def dockerImageName = "my-app:${commitId}"
+                    def dockerfilePath = "Project-Nest-JS/Dockerfile" // Updated path without space
+                    def unzipDir = "unzip_dir"
 
-                    echo "Building Docker image ${dockerImageTag}..."
+                    echo "Building Docker image: ${dockerImageName} from Dockerfile at ${dockerfilePath}"
 
-                    def buildStatus = sh(script: "docker build -t ${dockerImageTag} -f project-nestjs/Dockerfile .", returnStatus: true)
-
-                    def buildColor = buildStatus == 0 ? 'good' : 'danger'
-                    def buildMessage = buildStatus == 0 ? "Docker image ${dockerImageTag} built successfully." : "Failed to build Docker image ${dockerImageTag}."
-
-                    slackSend channel: SLACK_CHANNEL, color: buildColor, message: buildMessage
-                    
-                    env.DOCKER_IMAGE_TAG = dockerImageTag
-                }
-            }
-        }
-
-        stage('Publish Docker Image to Nexus') {
-            when {
-                expression { return env.DOCKER_IMAGE_TAG }
-            }
-            steps {
-                script {
-                    def dockerRegistryUrl = "127.0.1.1:10001/${NEXUS_DOCKER_REPOSITORY}/"
-                    def dockerImageTag = env.DOCKER_IMAGE_TAG
-                    
-                    echo "Publishing Docker image ${dockerImageTag} to Nexus at ${dockerRegistryUrl}..."
-
-                    withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
-                        def publishStatus = sh(script: """
-                            echo "" | docker login 127.0.1.1:10001 --username emna --password xAEVDA7B49
-                            docker tag ${dockerImageTag} ${dockerRegistryUrl}${dockerImageTag}
-                            docker push ${dockerRegistryUrl}${dockerImageTag}
-                        """, returnStatus: true)
-
-                        def publishColor = publishStatus == 0 ? 'good' : 'danger'
-                        def publishMessage = publishStatus == 0 ? "Docker image ${dockerImageTag} published to Nexus successfully." : "Failed to publish Docker image ${dockerImageTag} to Nexus."
-
-                        slackSend channel: SLACK_CHANNEL, color: publishColor, message: publishMessage
-                    }
-                }
-            }
-        }
-
-        stage('Deploy Docker Container') {
-            steps {
-                script {
-                    def dockerImageTag = env.DOCKER_IMAGE_TAG
-                    def portMapping = "${DEPLOYMENT_PORT}:80"
-                    def versionTag = params.VERSION_TAG
-                    def containerName = "${DEPLOYMENT_CONTAINER_NAME}-${versionTag}"
-
-                    echo "Deploying Docker image ${dockerImageTag} with container name ${containerName} on port ${DEPLOYMENT_PORT}..."
-
-                    def deployStatus = sh(script: """
-                        docker stop ${containerName} || true
-                        docker rm ${containerName} || true
-                        docker run -d --name ${containerName} -p ${portMapping} ${dockerImageTag}
-                    """, returnStatus: true)
-
-                    def deployColor = deployStatus == 0 ? 'good' : 'danger'
-                    def deployMessage = deployStatus == 0 ? "Docker container ${containerName} deployed successfully." : "Failed to deploy Docker container ${containerName}."
-
-                    slackSend channel: SLACK_CHANNEL, color: deployColor, message: deployMessage
-                }
-            }
-        }
-
-        stage('Check Container Status') {
-            steps {
-                script {
-                    sh "docker ps -a"
-                    sh "docker inspect ${DEPLOYMENT_CONTAINER_NAME}-${params.VERSION_TAG}"
-                    sh "docker logs ${DEPLOYMENT_CONTAINER_NAME}-${params.VERSION_TAG}"
-                }
-            }
-        }
-
-        stage('Run JMeter Tests') {
-            steps {
-                script {
-                    try {
-                        echo 'Building JMeter Docker image...'
-                        sh """
-                            docker build -f ${EXTRACT_PATH}/test/Dockerfile.jmeter -t ${JMETER_IMAGE_NAME} ${EXTRACT_PATH}
-                        """
-                        echo 'Cleaning up previous results...'
-                        sh """
-                            rm -rf ${EXTRACT_PATH}/${JMETER_RESULTS_PATH}/*
-                        """
-
-                        echo 'Running JMeter tests...'
-                        def versionTag = params.VERSION_TAG
-                        def containerName = "${DEPLOYMENT_CONTAINER_NAME}-${versionTag}"
-                        
-                        sh """
-                            docker run --rm \
-                                --link ${containerName}:my-app \
-                                -v ${EXTRACT_PATH}/${JMETER_TEST_PLAN_PATH}:/test/test_plan.jmx \
-                                -v ${EXTRACT_PATH}/${JMETER_RESULTS_PATH}:/test/results \
-                                ${JMETER_IMAGE_NAME} \
-                                -n -t /test/test_plan.jmx -l /test/results/results.jtl -e -o /test/results -Jhostname=my-app -Jport=80
-                        """
-                        slackSend channel: SLACK_CHANNEL, color: 'good', message: "JMeter tests completed successfully."
-                    } catch (Exception e) {
-                        echo "JMeter test execution failed, due to reports ${e.message}"
-                        slackSend channel: SLACK_CHANNEL, color: 'danger', message: "JMeter test execution failed: ${e.message}"
-                    }
-                }
-            }
-        }
-
-        stage('Cleanup') {
-            steps {
-                script {
-                    // Stop and remove Docker container
                     sh """
-                        docker stop ${DEPLOYMENT_CONTAINER_NAME} || true
-                        docker rm ${DEPLOYMENT_CONTAINER_NAME} || true
+                        chown -R jenkins:jenkins ${unzipDir}
+                        docker build -t ${dockerImageName} -f ${dockerfilePath} ${unzipDir}
                     """
                 }
             }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Build Docker Image of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Build Docker Image  of pipeline  failed!")
+                }
+            }
+
+        }
+
+        stage('Publish Docker Image to Nexus') {
+            steps {
+                script {
+                    def commitId = params.COMMIT_ID
+                    def dockerImageName = "my-app:${commitId}"
+                    def nexusDockerUrl = "127.0.1.1:10001/repository/${NEXUS_DOCKER_REPOSITORY}"
+
+                    echo "Publishing Docker image: ${dockerImageName} to Nexus Docker repository"
+
+                    withCredentials([usernamePassword(credentialsId: NEXUS_CREDENTIALS_ID, usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        sh """
+                            docker login 127.0.1.1:10001 -u ${NEXUS_USERNAME} -p ${NEXUS_PASSWORD}
+                            docker tag ${dockerImageName} ${nexusDockerUrl}/${dockerImageName}
+                            docker push ${nexusDockerUrl}/${dockerImageName}
+                        """
+                    }
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Publish Docker Image to Nexus of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Publish Docker Image to Nexus  of pipeline  failed!")
+                }
+            }
+
+        }
+        stage('Run Docker Container') {
+            steps {
+                script {
+                    def commitId = params.COMMIT_ID
+                    def dockerImageName = "my-app:${commitId}"
+                    def containerName = "my-container-${commitId}"
+                    def hostPort = "3001"  // Changed host port
+                    def containerPort = "3000"
+
+                    echo "Running Docker container from image: ${dockerImageName}"
+
+                    // Optionally remove any existing container with the same name
+                    sh """
+                        docker rm -f ${containerName} || true
+                    """
+
+                    // Run the Docker container with port mapping
+                    sh """
+                        docker run -d --name ${containerName} -p ${hostPort}:${containerPort} ${dockerImageName}
+                    """
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Run Docker Container of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Run Docker Container  of pipeline  failed!")
+                }
+            }
+
+        }
+
+        stage('Build JMeter Docker Image') {
+            steps {
+                script {
+                    echo "Building JMeter Docker image"
+
+                    // Navigate to the directory containing the Dockerfile
+                    dir('Project-Nest-JS') {
+                        // Confirm current working directory
+                        sh 'pwd'
+                
+                        // List files to confirm presence of Dockerfile
+                        sh 'ls -l'
+                
+                        // Build Docker image using the Dockerfile in the current directory
+                        sh """
+                            docker build -t ${JMETER_IMAGE_TAG} -f dockerfile .
+                        """
+                    }
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Build JMeter Docker Image of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Build JMeter Docker Image  of pipeline  failed!")
+                }
+            }
+
+        }
+        stage('Verify Workspace Contents') {
+            steps {
+                script {
+                    echo "Listing contents of the workspace"
+                    sh 'ls -l ${WORKSPACE}'
+                    sh 'find ${WORKSPACE} -name "performance-test.jmx"'
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Verify Workspace Contents of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Verify Workspace Contents  of pipeline  failed!")
+                }
+            }
+
+        }
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "Checking if JMeter test file exists..."
+
+                    // Vérifiez si le fichier existe dans l'espace de travail
+                    sh """
+                        if [ ! -f ${WORKSPACE}/${JMETER_TEST_FILE} ]; then
+                            echo "Test file ${JMETER_TEST_FILE} not found in ${WORKSPACE}"
+                            exit 1
+                        else
+                            echo "Test file ${JMETER_TEST_FILE} found."
+                        fi
+                    """
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Preparation of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Preparation  of pipeline  failed!")
+                }
+            }
+
+        }
+        stage('Run JMeter Performance Test') {
+            steps {
+                script {
+                    echo "Starting JMeter performance tests"
+
+                    // Exécuter les tests JMeter à l'intérieur du conteneur
+                    docker.image("${JMETER_IMAGE_TAG}").inside {
+                        // Créer le répertoire cible avant de copier le fichier
+                        sh """
+                            mkdir -p /tmp/unzip_dir/tests/jmeter
+                        """
+
+                        // Copier le fichier de test JMeter depuis l'espace de travail Jenkins dans le conteneur
+                        sh """
+                            cp ${WORKSPACE}/${JMETER_TEST_FILE} /tmp/unzip_dir/tests/jmeter/${JMETER_TEST_FILE_TMP}
+                        """
+
+                        // Exécuter le test JMeter
+                        sh """
+                            jmeter -n -t /tmp/unzip_dir/tests/jmeter/${JMETER_TEST_FILE_TMP} -l /tmp/jmeter-results.jtl
+                        """
+                    
+                        // Copier les résultats de retour dans l'espace de travail Jenkins
+                        sh """
+                            cp /tmp/jmeter-results.jtl ${WORKSPACE}/jmeter-results.jtl
+                        """
+                    }
+
+                    // Archiver les résultats pour une analyse ultérieure
+                    archiveArtifacts artifacts: 'jmeter-results.jtl', allowEmptyArchive: true
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Run JMeter Performance Test of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Run JMeter Performance Test  of pipeline  failed!")
+                }
+            }
+
+        }
+
+
+        stage('Stop and Remove Docker Container') {
+            steps {
+                script {
+                    def commitId = params.COMMIT_ID
+                    def containerName = "my-container-${commitId}"
+
+                    echo "Stopping Docker container: ${containerName}"
+
+                    // Stop and remove the Docker container
+                    sh """
+                        docker stop ${containerName} || true
+                        docker rm ${containerName} || true
+                    """
+                }
+            }
+            post {
+                success {
+                    slackSend (color: 'good', message: "Stop and Remove Docker Container of pipeline  succeeded!")
+                }
+                failure {
+                    slackSend (color: 'danger', message: "Stop and Remove Docker Container  of pipeline  failed!")
+                }
+            }
+
+        }
+    }
+    post {
+        always {      
+            cleanWs()      
+        }  
+        success {
+            slackSend channel: '#jenkins-alerts-pfe-2023', message: " build ${currentBuild.result} for job ${env.JOB_NAME} #${env.BUILD_NUMBER} (duration: ${currentBuild.durationString}). Check out the build at ${env.BUILD_URL}"
+        }
+        failure {
+            slackSend channel: '#jenkins-alerts-pfe-2023', message: "Build ${currentBuild.result} for ${env.JOB_NAME} #${env.BUILD_NUMBER} (duration: ${currentBuild.durationString}). Check out the build at ${env.BUILD_URL}"  
         }
     }
 
-    post {
-        success {
-            script {
-                slackSend channel: SLACK_CHANNEL, color: 'good', message: "Pipeline completed successfully. All stages executed without errors."
-            }
-        }
-        failure {
-            script {
-                slackSend channel: SLACK_CHANNEL, color: 'danger', message: "Pipeline failed. Check the logs for details."
-            }
-        }
-        always {
-            script {
-                echo "Pipeline execution finished."
-            }
-        }
-    }
 }
